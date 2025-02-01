@@ -6,6 +6,7 @@ const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:3000';
 export const AuthProvider = ({ children }) => {
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
 
     useEffect(() => {
         // 檢查本地存儲中的令牌
@@ -14,6 +15,7 @@ export const AuthProvider = ({ children }) => {
         
         if (token && userData) {
             setUser(JSON.parse(userData));
+            setIsAuthenticated(true);
         }
         setLoading(false);
     }, []);
@@ -37,6 +39,7 @@ export const AuthProvider = ({ children }) => {
             localStorage.setItem('token', data.token);
             localStorage.setItem('user', JSON.stringify(data.user));
             setUser(data.user);
+            setIsAuthenticated(true);
             return data;
         } catch (error) {
             throw error;
@@ -69,6 +72,7 @@ export const AuthProvider = ({ children }) => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         setUser(null);
+        setIsAuthenticated(false);
     };
 
     const value = {
@@ -76,7 +80,8 @@ export const AuthProvider = ({ children }) => {
         login,
         register,
         logout,
-        loading
+        loading,
+        isAuthenticated
     };
 
     return (

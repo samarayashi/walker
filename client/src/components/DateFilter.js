@@ -4,7 +4,7 @@ const DateFilter = ({ onDateChange }) => {
     const [showYearPicker, setShowYearPicker] = useState(false);
     const [showMonthPicker, setShowMonthPicker] = useState(false);
     const [showRangePicker, setShowRangePicker] = useState(false);
-    const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+    const [selectedYear] = useState(new Date().getFullYear());
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
 

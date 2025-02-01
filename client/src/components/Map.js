@@ -1,34 +1,57 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMapEvents } from 'react-leaflet';
+import React, { useState, useEffect, useRef, useCallback, useContext } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, useMap, Polyline } from 'react-leaflet';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import MarkerPopup from './MarkerPopup';
 import DateFilter from './DateFilter';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
+import MarkerClusterGroup from 'react-leaflet-cluster';
+import { getAllMarkers } from '../services/markers';
+import { getAllSerials } from '../services/serial';
+import MarkerForm from './MarkerForm';
+import SerialManager from './SerialManager';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:3000';
 
-// 修復 Leaflet 默認圖標問題
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-    iconRetinaUrl: require('leaflet/dist/images/marker-icon-2x.png'),
-    iconUrl: require('leaflet/dist/images/marker-icon.png'),
-    shadowUrl: require('leaflet/dist/images/marker-shadow.png'),
+// 修改標記圖標的部分
+const redIcon = new L.Icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41]
 });
 
-// 地圖點擊事件處理組件
+const defaultIcon = new L.Icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
+    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+    popupAnchor: [1, -34],
+    shadowSize: [41, 41]
+});
+
+// 修改地圖點擊事件處理組件
 const MapEvents = ({ onMapClick }) => {
-    useMapEvents({
-        click: (e) => {
-            onMapClick(e);
-        },
-    });
+    const map = useMap();
+    useEffect(() => {
+        const handleClick = (e) => {
+            onMapClick(e.latlng);
+        };
+        map.on('click', handleClick);
+        return () => {
+            map.off('click', handleClick);
+        };
+    }, [map, onMapClick]);
     return null;
 };
 
 const Map = () => {
+    const { isAuthenticated, user, logout } = useAuth();
     const [markers, setMarkers] = useState([]);
+    const [serials, setSerials] = useState([]);
     const [filteredMarkers, setFilteredMarkers] = useState([]);
     const [newMarker, setNewMarker] = useState(null);
     const [selectedMarker, setSelectedMarker] = useState(null);
@@ -36,13 +59,21 @@ const Map = () => {
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
     const [showSidebar, setShowSidebar] = useState(true);
-    const { user, logout } = useAuth();
     const navigate = useNavigate();
     const [editingMarker, setEditingMarker] = useState(null);
     const mapRef = useRef(null);
     const markerRefs = useRef({});  // 新增：用於存儲標記點的引用
     const [sortDirection, setSortDirection] = useState('desc'); // 'desc' 為由近到遠，'asc' 為由遠到近
     const [allTags, setAllTags] = useState(new Set()); // 存儲所有使用過的標籤
+    const [showMarkerForm, setShowMarkerForm] = useState(false);
+    const [showSerialManager, setShowSerialManager] = useState(false);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    const [selectedMarkers, setSelectedMarkers] = useState([]);
+    const [editingSerial, setEditingSerial] = useState(null);
+    const [activeSerials, setActiveSerials] = useState(new Set());
+    const [isSerialMode, setIsSerialMode] = useState(false);
+    const [currentSerial, setCurrentSerial] = useState([]);
     
     // 處理排序
     const sortMarkers = (markers, direction) => {
@@ -64,27 +95,93 @@ const Map = () => {
         setAllTags(tags);
     };
 
-    // 修改獲取標記點的 useEffect
-    useEffect(() => {
-        const fetchMarkers = async () => {
-            try {
-                const response = await fetch(`${API_URL}/api/markers`, {
-                    headers: {
-                        'Authorization': `Bearer ${localStorage.getItem('token')}`
+    // 修改 fetchMarkers 函數
+    const fetchMarkers = useCallback(async () => {
+        try {
+            const data = await getAllMarkers();
+            setMarkers(data);
+            setFilteredMarkers(data);
+            setError(null);
+            updateAllTags(data);
+        } catch (err) {
+            setError('獲取標記點失敗');
+            console.error('Error fetching markers:', err);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    // 修改 fetchSerials 函數
+    const fetchSerials = useCallback(async () => {
+        try {
+            // 獲取序列列表
+            const response = await fetch(`${API_URL}/api/serials`, {
+                headers: {
+                    'Authorization': `Bearer ${localStorage.getItem('token')}`
+                }
+            });
+            if (!response.ok) {
+                throw new Error('獲取序列失敗');
+            }
+            const serialsList = await response.json();
+            
+            // 為每個序列獲取其標記點
+            const serialsWithMarkers = await Promise.all(serialsList.map(async (serial) => {
+                try {
+                    // 使用正確的 API 路徑
+                    const detailResponse = await fetch(`${API_URL}/api/serials/${serial.id}`, {
+                        headers: {
+                            'Authorization': `Bearer ${localStorage.getItem('token')}`
+                        }
+                    });
+                    if (!detailResponse.ok) {
+                        console.error(`獲取序列 ${serial.id} 的詳細信息失敗`);
+                        return serial;
                     }
-                });
-                const data = await response.json();
-                const sortedData = sortMarkers(data, sortDirection);
-                setMarkers(sortedData);
-                setFilteredMarkers(sortedData);
-                updateAllTags(sortedData);
+                    const detailData = await detailResponse.json();
+                    console.log(`Serial ${serial.id} detail:`, detailData);
+                    
+                    // 從詳細信息中提取標記點 ID
+                    const markerIds = detailData.markers
+                        ? detailData.markers.map(m => m.marker_id)
+                        : [];
+                    
+                    return {
+                        ...detailData,
+                        marker_ids: markerIds
+                    };
+                } catch (error) {
+                    console.error(`獲取序列 ${serial.id} 的詳細信息時發生錯誤:`, error);
+                    return serial;
+                }
+            }));
+
+            console.log('Fetched serials with markers:', serialsWithMarkers);
+            setSerials(serialsWithMarkers);
+            // 默認顯示所有序列
+            setActiveSerials(new Set(serialsWithMarkers.map(serial => serial.id)));
+        } catch (err) {
+            console.error('Error fetching serials:', err);
+        }
+    }, []);
+
+    // 修改 useEffect
+    useEffect(() => {
+        const initializeData = async () => {
+            try {
+                if (isAuthenticated) {
+                    await Promise.all([fetchMarkers(), fetchSerials()]);
+                } else {
+                    setLoading(false);
+                }
             } catch (error) {
-                console.error('Error fetching markers:', error);
+                console.error('Error initializing data:', error);
+                setLoading(false);
             }
         };
-        
-        fetchMarkers();
-    }, [sortDirection]);
+
+        initializeData();
+    }, [isAuthenticated, fetchMarkers, fetchSerials]);
 
     // 修改搜索和篩選的 useEffect
     useEffect(() => {
@@ -95,7 +192,6 @@ const Map = () => {
             filtered = filtered.filter(marker => 
                 marker.title?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 marker.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                marker.weather?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 marker.tags?.some(tag => tag.toLowerCase().includes(searchTerm.toLowerCase()))
             );
         }
@@ -130,39 +226,61 @@ const Map = () => {
         setFilteredMarkers(filtered);
     }, [searchTerm, startDate, endDate, markers, sortDirection]);
     
-    // 添加新標記點
-    const handleMapClick = (e) => {
-        setNewMarker({
-            latitude: e.latlng.lat,
-            longitude: e.latlng.lng,
-            title: '',
-            description: '',
-            weather: '',
-            date: new Date().toISOString().split('T')[0],
-            tags: []
-        });
-    };
-    
-    // 保存新標記點
-    const handleSaveMarker = async () => {
-        try {
-            const response = await fetch(`${API_URL}/api/markers`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${localStorage.getItem('token')}`
-                },
-                body: JSON.stringify(newMarker)
+    // 修改地圖點擊處理函數
+    const handleMapClick = (latlng) => {
+        if (!isSerialMode) {
+            // 關閉任何打開的表單
+            setShowMarkerForm(false);
+            setSelectedMarker(null);
+            setEditingMarker(null);
+            // 設置新標記點
+            setNewMarker({
+                latitude: latlng.lat,
+                longitude: latlng.lng,
+                date: new Date().toISOString().split('T')[0]
             });
-            
-            const data = await response.json();
-            const newMarkerWithId = { ...newMarker, id: data.markerId };
-            setMarkers([...markers, newMarkerWithId]);
-            setFilteredMarkers([...filteredMarkers, newMarkerWithId]);
-            setNewMarker(null);
-        } catch (error) {
-            console.error('Error saving marker:', error);
+            setShowMarkerForm(true);
         }
+    };
+
+    // 修改標記點點擊處理函數
+    const handleMarkerClick = (marker) => {
+        if (isSerialMode) {
+            // 檢查是否與最後一個標記點相同
+            const lastMarker = currentSerial[currentSerial.length - 1];
+            if (lastMarker && lastMarker.id === marker.id) {
+                alert('不能連續添加相同的標記點');
+                return;
+            }
+            setCurrentSerial([...currentSerial, marker]);
+        } else {
+            // 正常模式下的標記點擊行為
+            setSelectedMarker(marker);
+            setShowMarkerForm(false);
+            setEditingMarker(null);
+            const markerRef = markerRefs.current[marker.id];
+            if (markerRef) {
+                markerRef.openPopup();
+            }
+        }
+    };
+
+    // 修改標記表單關閉處理函數
+    const handleMarkerFormClose = () => {
+        setSelectedMarker(null);
+        setNewMarker(null);
+        setShowMarkerForm(false);
+        setEditingMarker(null);
+        // 重新加載標記點
+        fetchMarkers();
+    };
+
+    // 處理序列管理器關閉
+    const handleSerialManagerClose = () => {
+        setShowSerialManager(false);
+        setEditingSerial(null);
+        setSelectedMarkers([]);
+        fetchSerials(); // 重新加載序列
     };
 
     // 刪除標記點
@@ -312,6 +430,302 @@ const Map = () => {
         </div>
     );
 
+    const handleMarkerSelect = (marker) => {
+        setSelectedMarkers(prev => {
+            const isSelected = prev.some(m => m.id === marker.id);
+            if (isSelected) {
+                return prev.filter(m => m.id !== marker.id);
+            } else {
+                return [...prev, marker];
+            }
+        });
+    };
+
+    // 處理序列創建完成
+    const handleSerialCreated = () => {
+        fetchSerials();
+        setSelectedMarkers([]);
+    };
+
+    // 切換序列顯示狀態
+    const toggleSerial = (serialId) => {
+        setActiveSerials(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(serialId)) {
+                newSet.delete(serialId);
+            } else {
+                newSet.add(serialId);
+            }
+            return newSet;
+        });
+    };
+
+    // 修改 handleEditSerialClick 函數
+    const handleEditSerialClick = (serial) => {
+        if (!serial) {
+            console.error('Invalid serial data');
+            return;
+        }
+        
+        console.log('Editing serial:', serial);
+        
+        // 從 markers 數組中找到對應的標記點
+        const serialMarkers = serial.markers
+            .map(markerData => {
+                const marker = markers.find(m => m.id === markerData.marker_id);
+                if (!marker) {
+                    console.log('Marker not found:', markerData.marker_id);
+                }
+                return marker;
+            })
+            .filter(Boolean);
+        
+        console.log('Found markers for serial:', serialMarkers);
+        
+        if (serialMarkers.length === 0) {
+            alert('此序列沒有有效的標記點');
+            return;
+        }
+        
+        setIsSerialMode(true);
+        setCurrentSerial(serialMarkers);
+        setEditingSerial(serial);
+    };
+
+    // 修改 saveSerial 函數
+    const saveSerial = async () => {
+        if (!currentSerial || currentSerial.length < 2) {
+            alert('序列至少需要包含兩個標記點');
+            return;
+        }
+
+        // 檢查是否有連續重複的標記點
+        for (let i = 1; i < currentSerial.length; i++) {
+            if (currentSerial[i].id === currentSerial[i - 1].id) {
+                alert('序列中不能包含連續重複的標記點');
+                return;
+            }
+        }
+
+        try {
+            const serialData = {
+                markers: currentSerial.map(marker => marker.id),
+                name: editingSerial ? editingSerial.name : `序列 ${serials.length + 1}`,
+                color: editingSerial ? editingSerial.color : `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`,
+                description: editingSerial?.description || null
+            };
+
+            console.log('Saving serial with data:', serialData);
+
+            const url = editingSerial 
+                ? `${API_URL}/api/serials/${editingSerial.id}`
+                : `${API_URL}/api/serials`;
+
+            const method = editingSerial ? 'PUT' : 'POST';
+
+            const response = await fetch(url, {
+                method: method,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('token')}`
+                },
+                body: JSON.stringify(serialData)
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.message || '保存序列失敗');
+            }
+
+            // 重新加載序列數據
+            await fetchSerials();
+            
+            // 清除序列模式
+            setIsSerialMode(false);
+            setCurrentSerial([]);
+            setEditingSerial(null);
+            
+            alert('序列保存成功！');
+        } catch (error) {
+            console.error('Error saving serial:', error);
+            alert('保存序列失敗：' + error.message);
+        }
+    };
+
+    // 添加刪除序列功能
+    const handleDeleteSerial = async (serialId) => {
+        if (!window.confirm('確定要刪除此序列嗎？')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API_URL}/api/serials/${serialId}`, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': `Bearer ${localStorage.getItem('token')}`
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error('刪除序列失敗');
+            }
+
+            // 重新加載序列數據
+            await fetchSerials();
+            alert('序列已刪除');
+        } catch (error) {
+            console.error('Error deleting serial:', error);
+            alert('刪除序列失敗：' + error.message);
+        }
+    };
+
+    // 修改序列控制面板的渲染
+    const SerialControls = () => (
+        <div className="absolute top-4 right-4 z-[1000] bg-white p-4 rounded-lg shadow-lg">
+            <div className="mb-4">
+                {!isSerialMode ? (
+                    <button
+                        onClick={startNewSerial}
+                        className="w-full bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
+                    >
+                        創建新序列
+                    </button>
+                ) : (
+                    <div className="space-y-2">
+                        <div className="bg-yellow-100 p-2 rounded text-sm">
+                            序列模式：已選擇 {currentSerial.length} 個標記點
+                        </div>
+                        <button
+                            onClick={saveSerial}
+                            className="w-full bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600"
+                        >
+                            保存序列
+                        </button>
+                        <button
+                            onClick={cancelSerial}
+                            className="w-full bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600"
+                        >
+                            取消
+                        </button>
+                    </div>
+                )}
+            </div>
+            <div className="space-y-2">
+                {serials.map(serial => (
+                    <div
+                        key={serial.id}
+                        className="flex items-center justify-between bg-gray-50 p-2 rounded"
+                    >
+                        <div className="flex items-center">
+                            <input
+                                type="checkbox"
+                                checked={activeSerials.has(serial.id)}
+                                onChange={() => toggleSerial(serial.id)}
+                                className="mr-2"
+                            />
+                            <span
+                                className="w-4 h-4 rounded-full mr-2"
+                                style={{ backgroundColor: serial.color }}
+                            />
+                            <span>{serial.name}</span>
+                        </div>
+                        <div className="flex space-x-2">
+                            <button
+                                onClick={() => handleEditSerialClick(serial)}
+                                className="text-indigo-600 hover:text-indigo-800"
+                            >
+                                編輯
+                            </button>
+                            <button
+                                onClick={() => handleDeleteSerial(serial.id)}
+                                className="text-red-600 hover:text-red-800"
+                            >
+                                刪除
+                            </button>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+
+    const startNewSerial = () => {
+        setIsSerialMode(true);
+        setCurrentSerial([]);
+    };
+
+    // 修改序列線條渲染部分
+    const renderSerialLines = () => {
+        if (!serials || !markers) {
+            console.log('No serials or markers data');
+            return null;
+        }
+        
+        return serials.map(serial => {
+            if (!serial || !activeSerials.has(serial.id)) {
+                return null;
+            }
+            
+            console.log('Processing serial for rendering:', serial);
+            
+            // 確保 serial.markers 存在且是數組，並且過濾掉無效的標記點
+            if (!Array.isArray(serial.markers)) {
+                console.log('Invalid markers array for serial:', serial.id);
+                return null;
+            }
+            
+            // 根據 sequence_number 排序並獲取有效的標記點位置
+            const positions = serial.markers
+                .filter(markerData => markerData && markerData.marker_id && markerData.latitude && markerData.longitude)
+                .sort((a, b) => a.sequence_number - b.sequence_number)
+                .map(markerData => [markerData.latitude, markerData.longitude]);
+
+            console.log('Valid positions for serial line:', positions);
+
+            if (positions.length < 2) {
+                console.log('Not enough valid positions for serial:', serial.id);
+                return null;
+            }
+
+            return (
+                <Polyline
+                    key={serial.id}
+                    positions={positions}
+                    pathOptions={{
+                        color: serial.color || '#3388ff',
+                        weight: 3,
+                        opacity: 0.7
+                    }}
+                />
+            );
+        }).filter(Boolean);
+    };
+
+    const cancelSerial = () => {
+        setIsSerialMode(false);
+        setCurrentSerial([]);
+    };
+
+    // 如果未認證，顯示登入提示
+    if (!isAuthenticated) {
+        return (
+            <div className="h-screen flex items-center justify-center">
+                <div className="text-center">
+                    <p className="text-xl text-gray-600 mb-4">請先登入以使用地圖功能</p>
+                    <button
+                        onClick={() => navigate('/login')}
+                        className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700"
+                    >
+                        前往登入
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    if (loading) return <div className="h-screen flex items-center justify-center">載入中...</div>;
+    if (error) return <div className="h-screen flex items-center justify-center text-red-600">{error}</div>;
+
     return (
         <div className="h-screen flex flex-col">
             <nav className="bg-indigo-600 p-4">
@@ -409,7 +823,6 @@ const Map = () => {
                                                 ))}
                                             </div>
                                         )}
-                                        <p className="text-sm text-gray-500 mt-1">{marker.weather}</p>
                                         <div className="mt-2 flex justify-end space-x-2">
                                             <button
                                                 onClick={(e) => {
@@ -457,150 +870,138 @@ const Map = () => {
                             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                         />
                         
-                        {filteredMarkers.map(marker => (
-                            <Marker
-                                key={marker.id}
-                                position={[marker.latitude, marker.longitude]}
-                                ref={(ref) => {
-                                    if (ref) {
-                                        markerRefs.current[marker.id] = ref;
-                                    }
-                                }}
-                                eventHandlers={{
-                                    click: () => {
-                                        setEditingMarker(null); // 重置編輯狀態
-                                        setSelectedMarker(marker);
-                                    }
-                                }}
-                            >
-                                <Popup
-                                    onClose={() => {
-                                        setEditingMarker(null); // 關閉彈出窗口時重置編輯狀態
+                        <MarkerClusterGroup>
+                            {filteredMarkers.map(marker => (
+                                <Marker
+                                    key={marker.id}
+                                    position={[marker.latitude, marker.longitude]}
+                                    ref={(ref) => {
+                                        if (ref) {
+                                            markerRefs.current[marker.id] = ref;
+                                        }
                                     }}
+                                    eventHandlers={{
+                                        click: () => handleMarkerClick(marker)
+                                    }}
+                                    icon={currentSerial.find(m => m.id === marker.id) ? redIcon : defaultIcon}
                                 >
-                                    {editingMarker?.id === marker.id ? (
-                                        <div className="p-4">
-                                            <input
-                                                type="text"
-                                                placeholder="標題"
-                                                className="w-full mb-2 p-2 border rounded"
-                                                value={editingMarker.title}
-                                                onChange={(e) => setEditingMarker({
-                                                    ...editingMarker,
-                                                    title: e.target.value
-                                                })}
-                                            />
-                                            <textarea
-                                                placeholder="描述"
-                                                className="w-full mb-2 p-2 border rounded"
-                                                value={editingMarker.description}
-                                                onChange={(e) => setEditingMarker({
-                                                    ...editingMarker,
-                                                    description: e.target.value
-                                                })}
-                                            />
-                                            <input
-                                                type="text"
-                                                placeholder="天氣"
-                                                className="w-full mb-2 p-2 border rounded"
-                                                value={editingMarker.weather}
-                                                onChange={(e) => setEditingMarker({
-                                                    ...editingMarker,
-                                                    weather: e.target.value
-                                                })}
-                                            />
-                                            <input
-                                                type="date"
-                                                className="w-full mb-2 p-2 border rounded"
-                                                value={editingMarker.date}
-                                                onChange={(e) => setEditingMarker({
-                                                    ...editingMarker,
-                                                    date: e.target.value
-                                                })}
-                                            />
-                                            <TagsInput marker={editingMarker} setMarker={setEditingMarker} />
-                                            <div className="flex justify-end space-x-2">
-                                                <button
-                                                    onClick={() => {
-                                                        setEditingMarker(null);
-                                                        const markerRef = markerRefs.current[marker.id];
-                                                        if (markerRef) {
-                                                            markerRef.closePopup();
-                                                        }
-                                                    }}
-                                                    className="px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
-                                                >
-                                                    取消
-                                                </button>
-                                                <button
-                                                    onClick={() => {
-                                                        handleEditMarker(marker.id, editingMarker);
-                                                        const markerRef = markerRefs.current[marker.id];
-                                                        if (markerRef) {
-                                                            markerRef.closePopup();
-                                                        }
-                                                    }}
-                                                    className="px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700"
-                                                >
-                                                    保存
-                                                </button>
+                                    <Popup
+                                        onClose={() => {
+                                            setEditingMarker(null); // 關閉彈出窗口時重置編輯狀態
+                                            setShowMarkerForm(false); // 確保表單被關閉
+                                        }}
+                                    >
+                                        {editingMarker?.id === marker.id ? (
+                                            <div className="p-4">
+                                                <input
+                                                    type="text"
+                                                    placeholder="標題"
+                                                    className="w-full mb-2 p-2 border rounded"
+                                                    value={editingMarker.title}
+                                                    onChange={(e) => setEditingMarker({
+                                                        ...editingMarker,
+                                                        title: e.target.value
+                                                    })}
+                                                />
+                                                <textarea
+                                                    placeholder="描述"
+                                                    className="w-full mb-2 p-2 border rounded"
+                                                    value={editingMarker.description}
+                                                    onChange={(e) => setEditingMarker({
+                                                        ...editingMarker,
+                                                        description: e.target.value
+                                                    })}
+                                                />
+                                                <input
+                                                    type="date"
+                                                    className="w-full mb-2 p-2 border rounded"
+                                                    value={editingMarker.date}
+                                                    onChange={(e) => setEditingMarker({
+                                                        ...editingMarker,
+                                                        date: e.target.value
+                                                    })}
+                                                />
+                                                <TagsInput marker={editingMarker} setMarker={setEditingMarker} />
+                                                <div className="flex justify-end space-x-2">
+                                                    <button
+                                                        onClick={() => {
+                                                            setEditingMarker(null);
+                                                            const markerRef = markerRefs.current[marker.id];
+                                                            if (markerRef) {
+                                                                markerRef.closePopup();
+                                                            }
+                                                        }}
+                                                        className="px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                                                    >
+                                                        取消
+                                                    </button>
+                                                    <button
+                                                        onClick={() => {
+                                                            handleEditMarker(marker.id, editingMarker);
+                                                            const markerRef = markerRefs.current[marker.id];
+                                                            if (markerRef) {
+                                                                markerRef.closePopup();
+                                                            }
+                                                        }}
+                                                        className="px-3 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+                                                    >
+                                                        保存
+                                                    </button>
+                                                </div>
                                             </div>
-                                        </div>
-                                    ) : (
-                                        <MarkerPopup
-                                            marker={marker}
-                                            onDelete={handleDeleteMarker}
-                                            onEdit={() => handleEditClick(marker)}
-                                        />
-                                    )}
-                                </Popup>
-                            </Marker>
-                        ))}
+                                        ) : (
+                                            <MarkerPopup
+                                                marker={marker}
+                                                onDelete={handleDeleteMarker}
+                                                onEdit={() => handleEditClick(marker)}
+                                            />
+                                        )}
+                                    </Popup>
+                                </Marker>
+                            ))}
+                        </MarkerClusterGroup>
                         
-                        {newMarker && (
-                            <Marker position={[newMarker.latitude, newMarker.longitude]}>
-                                <Popup>
-                                    <div className="p-4">
-                                        <input
-                                            type="text"
-                                            placeholder="標題"
-                                            className="w-full mb-2 p-2 border rounded"
-                                            value={newMarker.title}
-                                            onChange={(e) => setNewMarker({ ...newMarker, title: e.target.value })}
-                                        />
-                                        <textarea
-                                            placeholder="描述"
-                                            className="w-full mb-2 p-2 border rounded"
-                                            value={newMarker.description}
-                                            onChange={(e) => setNewMarker({ ...newMarker, description: e.target.value })}
-                                        />
-                                        <input
-                                            type="text"
-                                            placeholder="天氣"
-                                            className="w-full mb-2 p-2 border rounded"
-                                            value={newMarker.weather}
-                                            onChange={(e) => setNewMarker({ ...newMarker, weather: e.target.value })}
-                                        />
-                                        <input
-                                            type="date"
-                                            className="w-full mb-2 p-2 border rounded"
-                                            value={newMarker.date}
-                                            onChange={(e) => setNewMarker({ ...newMarker, date: e.target.value })}
-                                        />
-                                        <TagsInput marker={newMarker} setMarker={setNewMarker} />
-                                        <button
-                                            onClick={handleSaveMarker}
-                                            className="w-full bg-indigo-600 text-white p-2 rounded hover:bg-indigo-700"
-                                        >
-                                            保存
-                                        </button>
-                                    </div>
-                                </Popup>
-                            </Marker>
+                        {/* 渲染已保存的序列線條 */}
+                        {renderSerialLines()}
+
+                        {/* 顯示當前正在創建/編輯的序列線條 */}
+                        {isSerialMode && currentSerial && currentSerial.length >= 2 && (
+                            <Polyline
+                                positions={currentSerial.map(marker => [marker.latitude, marker.longitude])}
+                                color="red"
+                                weight={3}
+                                opacity={0.7}
+                            />
                         )}
                     </MapContainer>
+
+                    {/* 序列控制面板 */}
+                    <SerialControls />
+
+                    {/* 序列管理器 */}
+                    <SerialManager
+                        isOpen={showSerialManager}
+                        onClose={handleSerialManagerClose}
+                        selectedMarkers={selectedMarkers}
+                        onSerialCreated={handleSerialCreated}
+                        editingSerial={editingSerial}
+                    />
                 </div>
             </div>
+
+            {/* 將 MarkerForm 移到最上層 */}
+            {showMarkerForm && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[2000]">
+                    <MarkerForm
+                        marker={selectedMarker || newMarker}
+                        onClose={handleMarkerFormClose}
+                        onSave={() => {
+                            handleMarkerFormClose();
+                            fetchMarkers();
+                        }}
+                    />
+                </div>
+            )}
         </div>
     );
 };

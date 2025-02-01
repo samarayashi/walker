@@ -10,6 +10,7 @@ import path from 'path';
 import authRoutes from './routes/auth.js';
 import markerRoutes from './routes/markers.js';
 import photoRoutes from './routes/photos.js';
+import serialsRouter from './routes/serials.js';
 
 // 中間件導入
 import { errorHandler } from './middleware/errorHandler.js';
@@ -34,6 +35,7 @@ app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use('/api/auth', authRoutes);
 app.use('/api/markers', markerRoutes);
 app.use('/api/photos', photoRoutes);
+app.use('/api/serials', serialsRouter);
 
 // 錯誤處理中間件
 app.use(errorHandler);
