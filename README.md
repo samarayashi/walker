@@ -74,6 +74,11 @@ npm start
 docker exec -i [container-name] mysql -uroot -p[password] hiking_trail < database.sql
 ```
 
+## TODO
+[] 序列編輯：允許abab來回點擊建立路線導致，無法實施點擊取消
+[] 序列編輯：只能添加點和刪除整條路線
+[] 序列編輯：不能決定路線自己的顏色
+
 ## 貢獻
 
 歡迎提交 Pull Requests 來改進這個項目。
