@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import passport from 'passport';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import path from 'path';
@@ -14,7 +13,7 @@ import serialsRouter from './routes/serials.js';
 
 // 中間件導入
 import { errorHandler } from './middleware/errorHandler.js';
-import './config/passport.js';
+import passport from './config/passport.js'
 
 dotenv.config();
 
